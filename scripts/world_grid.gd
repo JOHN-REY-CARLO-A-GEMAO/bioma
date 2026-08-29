@@ -8,6 +8,10 @@ class_name WorldGrid
 @export var grid_size: Vector3i = Vector3i(32, 16, 32)
 @export var cell_size: float = 1.0
 
+# Determinism (sprint checkpoint #1): any non-negative seed reproduces the
+# same world on the same engine version; -1 = fresh random world each run.
+@export var world_seed: int = -1
+
 # Legacy 2D constants kept for compatibility with existing simulation code
 const CELL_SIZE := 8
 const GRID_WIDTH := 160   # 1280px / 8
@@ -40,24 +44,28 @@ var texture: ImageTexture
 var sprite: Sprite2D
 
 func _ready() -> void:
-	_initialize_grid()
+	_initialize_grid(world_seed)
 	_setup_rendering()
 
-func _initialize_grid() -> void:
-	var total := GRID_WIDTH * GRID_HEIGHT
-	temperature.resize(total)
-	moisture.resize(total)
-	biomass.resize(total)
-	nutrients.resize(total)
-	elevation.resize(total)
+func _initialize_grid(init_seed: int = -1) -> void:
+	# All randomness flows through one seeded RNG so a single seed reproduces
+	# the entire world (noise seeds, temperature jitter, biomass scatter,
+	# nutrient spread). Legacy code used the auto-seeded global RNG, which
+	# could not be reproduced; seeded worlds therefore have no legacy
+	# counterpart — by design.
+	var rng := RandomNumberGenerator.new()
+	if init_seed >= 0:
+		rng.seed = init_seed
+	else:
+		rng.randomize()
 
 	var noise := FastNoiseLite.new()
-	noise.seed = randi()
+	noise.seed = rng.randi()
 	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	noise.frequency = 0.02
 
 	var moisture_noise := FastNoiseLite.new()
-	moisture_noise.seed = randi() + 100
+	moisture_noise.seed = rng.randi()
 	moisture_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	moisture_noise.frequency = 0.015
 
@@ -70,7 +78,7 @@ func _initialize_grid() -> void:
 			elevation[idx] = e
 
 			# Temperature varies with elevation (lapse rate)
-			temperature[idx] = ambient_temp - (e * 15.0) + randf_range(-2, 2)
+			temperature[idx] = ambient_temp - (e * 15.0) + rng.randf_range(-2, 2)
 
 			# Moisture: lowlands are wetter, highlands drier
 			var m := (moisture_noise.get_noise_2d(x, y) + 1.0) * 0.5
@@ -80,10 +88,10 @@ func _initialize_grid() -> void:
 			var growth_potential := _calc_growth_potential(
 				temperature[idx], moisture[idx], nutrients[idx]
 			)
-			biomass[idx] = clampf(growth_potential * randf(), 0.0, 0.8)
+			biomass[idx] = clampf(growth_potential * rng.randf(), 0.0, 0.8)
 
 			# Nutrients start moderate
-			nutrients[idx] = randf_range(0.2, 0.6)
+			nutrients[idx] = rng.randf_range(0.2, 0.6)
 
 func _setup_rendering() -> void:
 	image = Image.create(GRID_WIDTH, GRID_HEIGHT, false, Image.FORMAT_RGB8)
@@ -217,14 +225,9 @@ func _simulate_ecosystem() -> void:
 	nutrients = new_nutrients
 
 func _calc_growth_potential(temp: float, moist: float, nutr: float) -> float:
-	## Plants grow best at ~25°C, moderate moisture, high nutrients
-	var temp_factor := 1.0 - absf(temp - 298.0) / 30.0
-	temp_factor = clampf(temp_factor, 0.0, 1.0)
-
-	var moist_factor := 1.0 - absf(moist - 0.5) * 2.0
-	moist_factor = clampf(moist_factor, 0.0, 1.0)
-
-	return temp_factor * moist_factor * nutr
+	## Delegates to the extracted, headless-testable core (SimCore).
+	## Values identical to gm-baseline — guarded by tests/unit/test_sim_core.gd.
+	return SimCore.calc_growth_potential(temp, moist, nutr)
 
 func _render_grid() -> void:
 	## Maps simulation data to pixel colors
