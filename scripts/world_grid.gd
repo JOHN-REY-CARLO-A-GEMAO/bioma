@@ -116,7 +116,7 @@ func _setup_rendering() -> void:
 	sprite.position = Vector2.ZERO
 	add_child(sprite)
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	if not is_simulating:
 		return
 
@@ -128,115 +128,40 @@ func _process(delta: float) -> void:
 		_render_grid()
 
 func _simulate_thermodynamics() -> void:
-	## Real heat diffusion + evaporation + condensation
-	var new_temp := temperature.duplicate()
-	var new_moisture := moisture.duplicate()
-
-	for y in range(1, GRID_HEIGHT - 1):
-		for x in range(1, GRID_WIDTH - 1):
-			var idx := _idx(x, y)
-
-			# --- Heat Diffusion (Fourier's Law, simplified) ---
-			var neighbor_avg := (
-				temperature[_idx(x-1, y)] +
-				temperature[_idx(x+1, y)] +
-				temperature[_idx(x, y-1)] +
-				temperature[_idx(x, y+1)]
-			) * 0.25
-
-			new_temp[idx] += (neighbor_avg - temperature[idx]) * heat_diffusion_rate
-
-			# Solar heating (stronger at low elevation)
-			new_temp[idx] += solar_intensity * (1.0 - elevation[idx]) * 0.1
-
-			# Radiative cooling toward ambient
-			new_temp[idx] += (ambient_temp - temperature[idx]) * 0.001
-
-			# --- Moisture Dynamics ---
-			# Evaporation: hot + wet = steam
-			if temperature[idx] > 310.0 and moisture[idx] > 0.1:
-				var evap := evaporation_rate * (temperature[idx] - 310.0) / 60.0
-				new_moisture[idx] -= evap
-				new_temp[idx] -= evap * 50.0  # Evaporative cooling!
-
-			# Rainfall: cool + humid areas get rain
-			if temperature[idx] < 290.0 and moisture[idx] > 0.3:
-				new_moisture[idx] += rainfall_rate
-
-			# Water flows downhill (simplified gravity)
-			var lowest_neighbor := idx
-			var lowest_elev := elevation[idx]
-			for offset: Vector2i in [Vector2i(-1,0), Vector2i(1,0), Vector2i(0,-1), Vector2i(0,1)]:
-				var nx: int = x + offset.x
-				var ny: int = y + offset.y
-				var nidx: int = _idx(nx, ny)
-				if elevation[nidx] < lowest_elev and moisture[nidx] < moisture[idx]:
-					lowest_elev = elevation[nidx]
-					lowest_neighbor = nidx
-
-			if lowest_neighbor != idx and moisture[idx] > 0.2:
-				var flow := (moisture[idx] - moisture[lowest_neighbor]) * 0.01
-				new_moisture[idx] -= flow
-				new_moisture[lowest_neighbor] += flow
-
-			new_moisture[idx] = clampf(new_moisture[idx], 0.0, 1.0)
-			new_temp[idx] = clampf(new_temp[idx], 200.0, 600.0)
-
-	temperature = new_temp
-	moisture = new_moisture
+	## WorldGrid is the scene adapter; SimCore owns the state transform.
+	var next_state := SimCore.simulate_thermodynamics(
+		temperature,
+		moisture,
+		elevation,
+		GRID_WIDTH,
+		GRID_HEIGHT,
+		ambient_temp,
+		solar_intensity,
+		heat_diffusion_rate,
+		evaporation_rate,
+		rainfall_rate,
+	)
+	temperature = next_state["temperature"]
+	moisture = next_state["moisture"]
 
 func _simulate_ecosystem() -> void:
-	## Vegetation grows, burns, and decomposes based on real conditions
-	var new_biomass := biomass.duplicate()
-	var new_nutrients := nutrients.duplicate()
-
-	for y in range(1, GRID_HEIGHT - 1):
-		for x in range(1, GRID_WIDTH - 1):
-			var idx := _idx(x, y)
-
-			# --- Combustion ---
-			if (temperature[idx] > combustion_threshold_temp
-				and biomass[idx] > combustion_min_biomass
-				and moisture[idx] < 0.2):
-
-				# FIRE! Biomass converts to heat and nutrients (ash)
-				var burn_amount := biomass[idx] * 0.1
-				new_biomass[idx] -= burn_amount
-				temperature[idx] += burn_amount * 200.0  # Fire releases heat
-				new_nutrients[idx] += burn_amount * 0.5   # Ash fertilizes
-				moisture[idx] -= 0.05  # Fire dries the area
-
-				# Fire spreads to neighbors
-				for offset: Vector2i in [Vector2i(-1,0), Vector2i(1,0), Vector2i(0,-1), Vector2i(0,1)]:
-					var nidx: int = _idx(x + offset.x, y + offset.y)
-					if biomass[nidx] > 0.2 and moisture[nidx] < 0.3:
-						temperature[nidx] += 30.0
-
-			# --- Growth ---
-			elif biomass[idx] < 1.0:
-				var potential := _calc_growth_potential(
-					temperature[idx], moisture[idx], nutrients[idx]
-				)
-				if potential > 0.1:
-					new_biomass[idx] += potential * vegetation_growth_rate
-
-					# Growth consumes nutrients and water
-					new_nutrients[idx] -= potential * 0.001
-					moisture[idx] -= potential * 0.002
-
-			# --- Decomposition ---
-			if biomass[idx] > 0.0 and temperature[idx] > 280.0:
-				var decay := biomass[idx] * decomposition_rate
-				if moisture[idx] > 0.3:
-					decay *= 2.0  # Wet = faster rot
-				new_biomass[idx] -= decay
-				new_nutrients[idx] += decay * 0.8  # Nutrients return to soil
-
-			new_biomass[idx] = clampf(new_biomass[idx], 0.0, 1.0)
-			new_nutrients[idx] = clampf(new_nutrients[idx], 0.0, 1.0)
-
-	biomass = new_biomass
-	nutrients = new_nutrients
+	## WorldGrid is the scene adapter; SimCore owns the state transform.
+	var next_state := SimCore.simulate_ecosystem(
+		temperature,
+		moisture,
+		biomass,
+		nutrients,
+		GRID_WIDTH,
+		GRID_HEIGHT,
+		vegetation_growth_rate,
+		combustion_threshold_temp,
+		combustion_min_biomass,
+		decomposition_rate,
+	)
+	temperature = next_state["temperature"]
+	moisture = next_state["moisture"]
+	biomass = next_state["biomass"]
+	nutrients = next_state["nutrients"]
 
 func _calc_growth_potential(temp: float, moist: float, nutr: float) -> float:
 	## Delegates to the extracted, headless-testable core (SimCore).
