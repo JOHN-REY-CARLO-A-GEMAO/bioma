@@ -1,0 +1,85 @@
+# =============================================================================
+# NOTE — ACTIVATION REQUIRED:
+# Move this file to .github/workflows/ci.yml to enable it:
+#   mkdir -p .github/workflows && cp ci/github-ci.yml .github/workflows/ci.yml
+#   git add -A && git commit -m "ci: activate pinned Godot pipeline" && git push
+# (GitHub rejects pushes of workflow files from tokens without the
+#  `workflows` permission — the Arena sandbox App token is so restricted.)
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, "arena/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: "4.6.2-stable"
+  # GitHub release-asset digest (sha256 of the zip), verified by ci/setup_godot.sh.
+  # Upgrade = bump both values together, deliberately (never track "latest").
+  GODOT_SHA256: "30e6b6d141f0cd5bebd629ad1d0ef1324e60091bb20662d026b402ba58c59937"
+
+jobs:
+  unit-tests:
+    name: Unit tests (Godot ${{ env.GODOT_VERSION }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: godot-bin
+          key: godot-${{ env.GODOT_VERSION }}-linux
+
+      - name: Install pinned Godot
+        run: ./ci/setup_godot.sh
+
+      - name: Import project resources
+        run: godot-bin/godot --headless --path . --import
+
+      - name: Run unit tests (gdUnit4)
+        run: addons/gdUnit4/runtest.sh -a tests/unit
+        env:
+          GODOT_BIN: ${{ github.workspace }}/godot-bin/godot
+
+      - name: Golden-master compare
+        run: |
+          set +e
+          godot-bin/godot --headless --path . -s res://tests/golden/golden_master_runner.gd -- compare
+          code=$?
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::Golden baseline file not committed yet — commit the artifact from the 'golden-baseline' job."
+            exit 0
+          fi
+          exit "$code"
+
+  golden-baseline:
+    name: Capture golden-master baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: godot-bin
+          key: godot-${{ env.GODOT_VERSION }}-linux
+
+      - name: Install pinned Godot
+        run: ./ci/setup_godot.sh
+
+      - name: Import project resources
+        run: godot-bin/godot --headless --path . --import
+
+      - name: Capture baseline
+        run: godot-bin/godot --headless --path . -s res://tests/golden/golden_master_runner.gd -- capture
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: golden-baseline
+          path: tests/golden/baseline_*.txt
+          if-no-files-found: error
