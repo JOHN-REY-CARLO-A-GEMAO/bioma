@@ -1,0 +1,24 @@
+﻿[gd_scene format=3 uid="uid://c38g8pvas675k"]
+
+[ext_resource type="Script" uid="uid://dtd3eaej1dr87" path="res://scripts/creature_ai.gd" id="1_crea"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_2"]
+radius = 0.4
+height = 1.0
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_2"]
+radius = 0.4
+height = 1.0
+
+[node name="Creature" type="CharacterBody3D" unique_id=73817523 groups=["creatures"]]
+script = ExtResource("1_crea")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=12721091]
+shape = SubResource("CapsuleShape3D_2")
+debug_color = Color(0.9, 0.3, 0.2, 0.42)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=939105842]
+mesh = SubResource("CapsuleMesh_2")
+
+[node name="NavigationAgent3D" type="NavigationAgent3D" parent="." unique_id=323016955]
+path_max_distance = 3.0

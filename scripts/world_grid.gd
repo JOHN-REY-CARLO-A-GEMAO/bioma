@@ -1,0 +1,387 @@
+extends Node3D
+class_name WorldGrid
+
+## Every cell in the world has real thermodynamic properties.
+## No arbitrary game logic — everything emerges from physics.
+
+# 3D grid properties expected by main.tscn (Node3D)
+@export var grid_size: Vector3i = Vector3i(32, 16, 32)
+@export var cell_size: float = 1.0
+
+# Legacy 2D constants kept for compatibility with existing simulation code
+const CELL_SIZE := 8
+const GRID_WIDTH := 160   # 1280px / 8
+const GRID_HEIGHT := 90   # 720px / 8
+
+# --- Cell Data Arrays (SoA for cache performance) ---
+var temperature: PackedFloat32Array    # Kelvin (273-373 typical)
+var moisture: PackedFloat32Array       # 0.0 (bone dry) to 1.0 (flooded)
+var biomass: PackedFloat32Array        # 0.0 (barren) to 1.0 (dense forest)
+var nutrients: PackedFloat32Array      # 0.0 to 1.0 (soil fertility)
+var elevation: PackedFloat32Array      # 0.0 to 1.0 (affects water flow)
+
+# --- Simulation Parameters ---
+@export var ambient_temp: float = 293.0       # ~20°C
+@export var solar_intensity: float = 0.3      # Sun heating factor
+@export var heat_diffusion_rate: float = 0.02
+@export var evaporation_rate: float = 0.005
+@export var rainfall_rate: float = 0.001
+@export var vegetation_growth_rate: float = 0.002
+@export var combustion_threshold_temp: float = 373.0  # 100°C
+@export var combustion_min_biomass: float = 0.3
+@export var decomposition_rate: float = 0.001
+
+var tick_count: int = 0
+var is_simulating: bool = true
+
+# Rendering
+var image: Image
+var texture: ImageTexture
+var sprite: Sprite2D
+
+func _ready() -> void:
+	_initialize_grid()
+	_setup_rendering()
+
+func _initialize_grid() -> void:
+	var total := GRID_WIDTH * GRID_HEIGHT
+	temperature.resize(total)
+	moisture.resize(total)
+	biomass.resize(total)
+	nutrients.resize(total)
+	elevation.resize(total)
+
+	var noise := FastNoiseLite.new()
+	noise.seed = randi()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	noise.frequency = 0.02
+
+	var moisture_noise := FastNoiseLite.new()
+	moisture_noise.seed = randi() + 100
+	moisture_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	moisture_noise.frequency = 0.015
+
+	for y in range(GRID_HEIGHT):
+		for x in range(GRID_WIDTH):
+			var idx := _idx(x, y)
+
+			# Generate terrain
+			var e := (noise.get_noise_2d(x, y) + 1.0) * 0.5
+			elevation[idx] = e
+
+			# Temperature varies with elevation (lapse rate)
+			temperature[idx] = ambient_temp - (e * 15.0) + randf_range(-2, 2)
+
+			# Moisture: lowlands are wetter, highlands drier
+			var m := (moisture_noise.get_noise_2d(x, y) + 1.0) * 0.5
+			moisture[idx] = clampf(m + (1.0 - e) * 0.3, 0.0, 1.0)
+
+			# Biomass grows where conditions are good
+			var growth_potential := _calc_growth_potential(
+				temperature[idx], moisture[idx], nutrients[idx]
+			)
+			biomass[idx] = clampf(growth_potential * randf(), 0.0, 0.8)
+
+			# Nutrients start moderate
+			nutrients[idx] = randf_range(0.2, 0.6)
+
+func _setup_rendering() -> void:
+	image = Image.create(GRID_WIDTH, GRID_HEIGHT, false, Image.FORMAT_RGB8)
+	texture = ImageTexture.create_from_image(image)
+	sprite = Sprite2D.new()
+	sprite.texture = texture
+	sprite.scale = Vector2(CELL_SIZE, CELL_SIZE)
+	sprite.position = Vector2.ZERO
+	add_child(sprite)
+
+func _process(delta: float) -> void:
+	if not is_simulating:
+		return
+
+	# Run simulation at ~10 ticks/sec for stability
+	tick_count += 1
+	if tick_count % 6 == 0:
+		_simulate_thermodynamics()
+		_simulate_ecosystem()
+		_render_grid()
+
+func _simulate_thermodynamics() -> void:
+	## Real heat diffusion + evaporation + condensation
+	var new_temp := temperature.duplicate()
+	var new_moisture := moisture.duplicate()
+
+	for y in range(1, GRID_HEIGHT - 1):
+		for x in range(1, GRID_WIDTH - 1):
+			var idx := _idx(x, y)
+
+			# --- Heat Diffusion (Fourier's Law, simplified) ---
+			var neighbor_avg := (
+				temperature[_idx(x-1, y)] +
+				temperature[_idx(x+1, y)] +
+				temperature[_idx(x, y-1)] +
+				temperature[_idx(x, y+1)]
+			) * 0.25
+
+			new_temp[idx] += (neighbor_avg - temperature[idx]) * heat_diffusion_rate
+
+			# Solar heating (stronger at low elevation)
+			new_temp[idx] += solar_intensity * (1.0 - elevation[idx]) * 0.1
+
+			# Radiative cooling toward ambient
+			new_temp[idx] += (ambient_temp - temperature[idx]) * 0.001
+
+			# --- Moisture Dynamics ---
+			# Evaporation: hot + wet = steam
+			if temperature[idx] > 310.0 and moisture[idx] > 0.1:
+				var evap := evaporation_rate * (temperature[idx] - 310.0) / 60.0
+				new_moisture[idx] -= evap
+				new_temp[idx] -= evap * 50.0  # Evaporative cooling!
+
+			# Rainfall: cool + humid areas get rain
+			if temperature[idx] < 290.0 and moisture[idx] > 0.3:
+				new_moisture[idx] += rainfall_rate
+
+			# Water flows downhill (simplified gravity)
+			var lowest_neighbor := idx
+			var lowest_elev := elevation[idx]
+			for offset: Vector2i in [Vector2i(-1,0), Vector2i(1,0), Vector2i(0,-1), Vector2i(0,1)]:
+				var nx: int = x + offset.x
+				var ny: int = y + offset.y
+				var nidx: int = _idx(nx, ny)
+				if elevation[nidx] < lowest_elev and moisture[nidx] < moisture[idx]:
+					lowest_elev = elevation[nidx]
+					lowest_neighbor = nidx
+
+			if lowest_neighbor != idx and moisture[idx] > 0.2:
+				var flow := (moisture[idx] - moisture[lowest_neighbor]) * 0.01
+				new_moisture[idx] -= flow
+				new_moisture[lowest_neighbor] += flow
+
+			new_moisture[idx] = clampf(new_moisture[idx], 0.0, 1.0)
+			new_temp[idx] = clampf(new_temp[idx], 200.0, 600.0)
+
+	temperature = new_temp
+	moisture = new_moisture
+
+func _simulate_ecosystem() -> void:
+	## Vegetation grows, burns, and decomposes based on real conditions
+	var new_biomass := biomass.duplicate()
+	var new_nutrients := nutrients.duplicate()
+
+	for y in range(1, GRID_HEIGHT - 1):
+		for x in range(1, GRID_WIDTH - 1):
+			var idx := _idx(x, y)
+
+			# --- Combustion ---
+			if (temperature[idx] > combustion_threshold_temp
+				and biomass[idx] > combustion_min_biomass
+				and moisture[idx] < 0.2):
+
+				# FIRE! Biomass converts to heat and nutrients (ash)
+				var burn_amount := biomass[idx] * 0.1
+				new_biomass[idx] -= burn_amount
+				temperature[idx] += burn_amount * 200.0  # Fire releases heat
+				new_nutrients[idx] += burn_amount * 0.5   # Ash fertilizes
+				moisture[idx] -= 0.05  # Fire dries the area
+
+				# Fire spreads to neighbors
+				for offset: Vector2i in [Vector2i(-1,0), Vector2i(1,0), Vector2i(0,-1), Vector2i(0,1)]:
+					var nidx: int = _idx(x + offset.x, y + offset.y)
+					if biomass[nidx] > 0.2 and moisture[nidx] < 0.3:
+						temperature[nidx] += 30.0
+
+			# --- Growth ---
+			elif biomass[idx] < 1.0:
+				var potential := _calc_growth_potential(
+					temperature[idx], moisture[idx], nutrients[idx]
+				)
+				if potential > 0.1:
+					new_biomass[idx] += potential * vegetation_growth_rate
+
+					# Growth consumes nutrients and water
+					new_nutrients[idx] -= potential * 0.001
+					moisture[idx] -= potential * 0.002
+
+			# --- Decomposition ---
+			if biomass[idx] > 0.0 and temperature[idx] > 280.0:
+				var decay := biomass[idx] * decomposition_rate
+				if moisture[idx] > 0.3:
+					decay *= 2.0  # Wet = faster rot
+				new_biomass[idx] -= decay
+				new_nutrients[idx] += decay * 0.8  # Nutrients return to soil
+
+			new_biomass[idx] = clampf(new_biomass[idx], 0.0, 1.0)
+			new_nutrients[idx] = clampf(new_nutrients[idx], 0.0, 1.0)
+
+	biomass = new_biomass
+	nutrients = new_nutrients
+
+func _calc_growth_potential(temp: float, moist: float, nutr: float) -> float:
+	## Plants grow best at ~25°C, moderate moisture, high nutrients
+	var temp_factor := 1.0 - absf(temp - 298.0) / 30.0
+	temp_factor = clampf(temp_factor, 0.0, 1.0)
+
+	var moist_factor := 1.0 - absf(moist - 0.5) * 2.0
+	moist_factor = clampf(moist_factor, 0.0, 1.0)
+
+	return temp_factor * moist_factor * nutr
+
+func _render_grid() -> void:
+	## Maps simulation data to pixel colors
+	for y in range(GRID_HEIGHT):
+		for x in range(GRID_WIDTH):
+			var idx := _idx(x, y)
+			var color := Color.BLACK
+
+			var t := temperature[idx]
+			var m := moisture[idx]
+			var b := biomass[idx]
+			var n := nutrients[idx]
+
+			if b > 0.1:
+				# Vegetation: green, darker = denser
+				var g := 0.2 + b * 0.6
+				var r := 0.1 + n * 0.15  # Nutrient-rich = slightly yellow
+				var bl := 0.05
+				color = Color(r, g, bl)
+
+				# Fire overlay
+				if t > combustion_threshold_temp and m < 0.2:
+					color = Color(1.0, 0.3 + randf() * 0.4, 0.0)
+			elif m > 0.5:
+				# Water: blue
+				color = Color(0.1, 0.2, 0.5 + m * 0.3)
+			elif t > 340.0:
+				# Hot barren: red/orange
+				color = Color(0.6, 0.2, 0.05)
+			else:
+				# Barren ground: brown/gray based on elevation
+				var base := 0.2 + elevation[idx] * 0.3
+				color = Color(base, base * 0.8, base * 0.5)
+
+			image.set_pixel(x, y, color)
+
+	texture.update(image)
+
+# --- Public API for Player & Creatures ---
+
+func get_cell_data(x: int, y: int) -> Dictionary:
+	if x < 0 or x >= GRID_WIDTH or y < 0 or y >= GRID_HEIGHT:
+		return {}
+	var idx := _idx(x, y)
+	return {
+		"temperature": temperature[idx],
+		"moisture": moisture[idx],
+		"biomass": biomass[idx],
+		"nutrients": nutrients[idx],
+		"elevation": elevation[idx]
+	}
+
+func apply_heat(x: int, y: int, amount: float, radius: int = 3) -> void:
+	for dy: int in range(-radius, radius + 1):
+		for dx: int in range(-radius, radius + 1):
+			var nx: int = x + dx
+			var ny: int = y + dy
+			if nx >= 0 and nx < GRID_WIDTH and ny >= 0 and ny < GRID_HEIGHT:
+				var dist := Vector2(dx, dy).length()
+				if dist <= radius:
+					var falloff := 1.0 - (dist / radius)
+					temperature[_idx(nx, ny)] += amount * falloff
+
+func apply_water(x: int, y: int, amount: float, radius: int = 3) -> void:
+	for dy: int in range(-radius, radius + 1):
+		for dx: int in range(-radius, radius + 1):
+			var nx: int = x + dx
+			var ny: int = y + dy
+			if nx >= 0 and nx < GRID_WIDTH and ny >= 0 and ny < GRID_HEIGHT:
+				var dist := Vector2(dx, dy).length()
+				if dist <= radius:
+					var falloff := 1.0 - (dist / radius)
+					moisture[_idx(nx, ny)] += amount * falloff
+
+func consume_biomass(x: int, y: int, amount: float) -> float:
+	if x < 0 or x >= GRID_WIDTH or y < 0 or y >= GRID_HEIGHT:
+		return 0.0
+	var idx := _idx(x, y)
+	var consumed := minf(biomass[idx], amount)
+	biomass[idx] -= consumed
+	return consumed
+
+func world_to_grid(world_pos: Variant) -> Vector2i:
+	# Supports both Vector2 (legacy 2D) and Vector3 (3D world) inputs
+	if world_pos is Vector3:
+		return Vector2i(
+			int(world_pos.x / cell_size) if cell_size != 0 else int(world_pos.x / CELL_SIZE),
+			int(world_pos.z / cell_size) if cell_size != 0 else int(world_pos.z / CELL_SIZE)
+		)
+	elif world_pos is Vector2:
+		return Vector2i(
+			int(world_pos.x / CELL_SIZE),
+			int(world_pos.y / CELL_SIZE)
+		)
+	elif world_pos is Vector2i:
+		return world_pos
+	elif world_pos is Vector3i:
+		return Vector2i(world_pos.x, world_pos.z)
+	else:
+		push_warning("world_to_grid: expected Vector2/Vector3, got %s" % typeof(world_pos))
+		return Vector2i.ZERO
+
+func grid_to_world(grid_pos: Variant) -> Vector2:
+	var x: int
+	var y: int
+	if grid_pos is Vector2i:
+		x = grid_pos.x
+		y = grid_pos.y
+	elif grid_pos is Vector3i:
+		x = grid_pos.x
+		y = grid_pos.z
+	else:
+		push_warning("grid_to_world: expected Vector2i, got %s" % typeof(grid_pos))
+		return Vector2.ZERO
+	return Vector2(
+		x * CELL_SIZE + CELL_SIZE / 2.0,
+		y * CELL_SIZE + CELL_SIZE / 2.0
+	)
+
+func grid_to_world_3d(grid_pos: Variant) -> Vector3:
+	# 3D helper for CharacterBody3D logic
+	if grid_pos is Vector2i:
+		return Vector3(grid_pos.x * cell_size + cell_size * 0.5, 0.5, grid_pos.y * cell_size + cell_size * 0.5)
+	elif grid_pos is Vector3i:
+		return Vector3(grid_pos.x * cell_size + cell_size * 0.5, float(grid_pos.y) * cell_size, grid_pos.z * cell_size + cell_size * 0.5)
+	elif grid_pos is Vector2:
+		return Vector3(grid_pos.x, 0.5, grid_pos.y)
+	else:
+		return Vector3.ZERO
+
+func get_neighbors(pos: Variant, include_diagonal: bool = false) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	var p: Vector3i
+	if pos is Vector2i:
+		p = Vector3i(pos.x, pos.y, 0)
+	elif pos is Vector3i:
+		p = pos
+	else:
+		return result
+	# Von Neumann neighborhood (6 orthogonal) by default
+	var offsets: Array[Vector3i] = [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+	]
+	if include_diagonal:
+		# Moore neighborhood: all 26 surrounding cells in 3D
+		offsets.clear()
+		for dz in range(-1, 2):
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					if dx == 0 and dy == 0 and dz == 0:
+						continue
+					offsets.append(Vector3i(dx, dy, dz))
+	for off in offsets:
+		result.append(p + off)
+	return result
+
+func _idx(x: int, y: int) -> int:
+	return y * GRID_WIDTH + x

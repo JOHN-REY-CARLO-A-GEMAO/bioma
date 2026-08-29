@@ -1,0 +1,8 @@
+﻿[gd_scene load_steps=2 format=3 uid="uid://b1x8y6g1p2w8r"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_r4x7q"]
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_r4x7q")
+initial_creatures = 40
+max_creatures = 120
