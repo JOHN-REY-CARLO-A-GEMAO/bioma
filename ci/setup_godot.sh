@@ -9,11 +9,11 @@ GODOT_SHA256="${GODOT_SHA256:?Set GODOT_SHA256 to the pinned release asset diges
 mkdir -p godot-bin
 cd godot-bin
 if [ ! -f godot ]; then
-	curl -fsSL --retry 3 -o godot.zip \
-		"https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_${GODOT_VERSION}_linux.x86_64.zip"
+	curl -fsSL --retry 3 --retry-all-errors -o godot.zip \
+		"https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_linux.x86_64.zip"
 	echo "${GODOT_SHA256}  godot.zip" | sha256sum -c -
 	unzip -oq godot.zip
-	mv "Godot_${GODOT_VERSION}_linux.x86_64" godot
+	mv "Godot_v${GODOT_VERSION}_linux.x86_64" godot
 fi
 chmod +x godot
 ./godot --version

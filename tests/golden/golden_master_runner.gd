@@ -7,7 +7,9 @@ extends SceneTree
 ##
 ## Exit codes (compare mode): 0 = matches baseline, 1 = diverged, 2 = baseline missing.
 ##
-## The baseline file IS committed. Contract:
+## The baseline belongs at `baseline_seed1337_t200.txt`. Compare exits 2 when it
+## is absent, so a missing baseline must never be reported as a verified match.
+## Contract:
 ##   * Increment 2 (SimCore adoption of thermo/ecosystem) must keep compare GREEN.
 ##   * Increment 3 (stencil write-order fix) is EXPECTED to diverge: re-capture,
 ##     and paste this script's expected/actual report into that PR description.
@@ -36,7 +38,7 @@ func _initialize() -> void:
 	for key in KEYS:
 		var arr: PackedFloat32Array = wg.get(key)
 		report += "%s hash=%d mean=%.6f min=%.3f max=%.3f\n" % [
-			key, arr.hash(), _mean(arr), _min(arr), _max(arr)
+			key, hash(arr), _mean(arr), _min(arr), _max(arr)
 		]
 	wg.free()
 

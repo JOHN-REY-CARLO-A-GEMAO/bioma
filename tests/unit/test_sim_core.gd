@@ -68,6 +68,18 @@ func test_world_grid_delegates_to_simcore() -> void:
 
 # --- seed determinism (checkpoint #1) ---
 
+func test_grid_init_allocates_every_cell() -> void:
+	var wg := WorldGrid.new()
+	wg._initialize_grid(1337)
+	var cell_count: int = WorldGrid.GRID_WIDTH * WorldGrid.GRID_HEIGHT
+	assert_int(wg.temperature.size()).is_equal(cell_count)
+	assert_int(wg.moisture.size()).is_equal(cell_count)
+	assert_int(wg.biomass.size()).is_equal(cell_count)
+	assert_int(wg.nutrients.size()).is_equal(cell_count)
+	assert_int(wg.elevation.size()).is_equal(cell_count)
+	wg.free()
+
+
 func test_grid_init_is_seed_reproducible() -> void:
 	var a := WorldGrid.new()
 	var b := WorldGrid.new()
@@ -90,3 +102,24 @@ func test_different_seeds_produce_different_worlds() -> void:
 	assert_that(a.elevation != b.elevation).is_true()
 	a.free()
 	b.free()
+
+
+func test_seeded_reset_rebuilds_clean_buffers() -> void:
+	var wg := WorldGrid.new()
+	wg._initialize_grid(1337)
+	var initial_temperature := wg.temperature.duplicate()
+	var initial_moisture := wg.moisture.duplicate()
+	var initial_biomass := wg.biomass.duplicate()
+	var initial_nutrients := wg.nutrients.duplicate()
+	var initial_elevation := wg.elevation.duplicate()
+
+	wg._simulate_thermodynamics()
+	wg._simulate_ecosystem()
+	wg._initialize_grid(1337)
+
+	assert_that(wg.temperature == initial_temperature).is_true()
+	assert_that(wg.moisture == initial_moisture).is_true()
+	assert_that(wg.biomass == initial_biomass).is_true()
+	assert_that(wg.nutrients == initial_nutrients).is_true()
+	assert_that(wg.elevation == initial_elevation).is_true()
+	wg.free()
