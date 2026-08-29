@@ -48,6 +48,20 @@ func _ready() -> void:
 	_setup_rendering()
 
 func _initialize_grid(init_seed: int = -1) -> void:
+	# Recreate every buffer so first initialization and resets begin from the
+	# same empty state. Packed arrays do not grow through indexed assignment.
+	var cell_count := GRID_WIDTH * GRID_HEIGHT
+	temperature = PackedFloat32Array()
+	temperature.resize(cell_count)
+	moisture = PackedFloat32Array()
+	moisture.resize(cell_count)
+	biomass = PackedFloat32Array()
+	biomass.resize(cell_count)
+	nutrients = PackedFloat32Array()
+	nutrients.resize(cell_count)
+	elevation = PackedFloat32Array()
+	elevation.resize(cell_count)
+
 	# All randomness flows through one seeded RNG so a single seed reproduces
 	# the entire world (noise seeds, temperature jitter, biomass scatter,
 	# nutrient spread). Legacy code used the auto-seeded global RNG, which
